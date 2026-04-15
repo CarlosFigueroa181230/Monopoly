@@ -1,3 +1,5 @@
+import { resolveOpenInvestment } from './investmentEngine.js';
+
 // FORMATTING M$
 const formatMoney = (amount) => {
     return 'M$ ' + amount.toLocaleString('en-US');
@@ -43,18 +45,13 @@ class Investment {
 
     resolve() {
         if (this.type === 'closed') {
-            // Closed: fixed 10% gain per turn
             const rate = 0.10 * this.durationTurns;
-            return Math.floor(this.amount * (1 + rate));
+            return {
+                finalAmount: Math.floor(this.amount * (1 + rate)),
+                path: null
+            };
         } else {
-            // Open: randomized
-            // 50% chance -> gain 20%
-            // 30% chance -> gain 50%
-            // 20% chance -> lose 30%
-            const r = Math.random();
-            if (r < 0.5) return Math.floor(this.amount * 1.20);
-            else if (r < 0.8) return Math.floor(this.amount * 1.50);
-            else return Math.floor(this.amount * 0.70);
+            return resolveOpenInvestment(this.amount, this.durationTurns);
         }
     }
 }
@@ -64,7 +61,7 @@ class BankManager {
         this.players = new Map();
         this.history = [];
         this.investments = [];
-        
+
         // Carga inicial (Opcional, pero se resetea al recargar)
         console.log("Banco Central Monopoly Iniciado");
     }
@@ -89,10 +86,10 @@ class BankManager {
             const fromP = this.getPlayer(fromId);
             const toP = this.getPlayer(toId);
             if (fromP.balance < amount) throw new Error(`Saldo insuficiente en la cuenta de ${fromP.name}.`);
-            
+
             fromP.balance -= amount;
             toP.balance += amount;
-            
+
         } else if (type === 'bank-in') {
             const fromP = this.getPlayer(fromId);
             if (fromP.balance < amount) throw new Error(`Saldo insuficiente en la cuenta de ${fromP.name}.`);
@@ -113,7 +110,7 @@ class BankManager {
         if (txIndex === -1) throw new Error("No hay transacciones para deshacer.");
 
         const tx = this.history[txIndex];
-        
+
         // Reverse balances
         if (tx.type === 'transfer') {
             const pFrom = this.getPlayer(tx.from);
@@ -121,11 +118,11 @@ class BankManager {
             if (pTo.balance < tx.amount) throw new Error(`No se puede deshacer. ${pTo.name} ya no tiene el saldo que recibió.`);
             pTo.balance -= tx.amount;
             pFrom.balance += tx.amount;
-            
+
         } else if (tx.type === 'bank-in') {
             const pFrom = this.getPlayer(tx.from);
             pFrom.balance += tx.amount;
-            
+
         } else if (tx.type === 'bank-out') {
             const pTo = this.getPlayer(tx.to);
             if (pTo.balance < tx.amount) throw new Error(`No se puede deshacer. ${pTo.name} gastó el dinero recibido.`);
@@ -134,7 +131,7 @@ class BankManager {
 
         // Remove from history
         this.history.splice(txIndex, 1);
-        
+
         // Add log
         const undoTx = new Transaction('system', 'SYS', 'SYS', 0, `Deshecha transacción por M$ ${tx.amount.toLocaleString('en-US')}`);
         undoTx.isRevertible = false;
@@ -171,16 +168,23 @@ class BankManager {
             if (inv.turnsLeft <= 0) {
                 // Resolve
                 const p = this.getPlayer(inv.playerId);
-                const finalAmount = inv.resolve();
+                const result = inv.resolve();
+                const finalAmount = result.finalAmount;
                 p.balance += finalAmount;
 
                 const profit = finalAmount - inv.amount;
                 const resultText = profit >= 0 ? `Ganancia: +M$${profit.toLocaleString('en-US')}` : `Pérdida: M$${profit.toLocaleString('en-US')}`;
-                
+
                 const tx = new Transaction('invest-return', 'BANK', p.id, finalAmount, `Retorno Inversión: ${resultText}`);
                 tx.isRevertible = false;
                 this.history.unshift(tx);
-                events.push({ playerId: p.id, txt: `Inversión resuelta. ${resultText}`});
+                events.push({
+                    playerId: p.id,
+                    txt: `Inversión resuelta. ${resultText}`,
+                    path: result.path,
+                    initial: inv.amount,
+                    final: finalAmount
+                });
 
                 // Remove from lists
                 p.investments = p.investments.filter(item => item.id !== inv.id);
@@ -219,9 +223,9 @@ function render() {
     playersArray.forEach(p => {
         const card = document.createElement('div');
         card.className = 'player-card glass-panel';
-        
+
         const invAmount = p.investedBalance;
-        
+
         card.innerHTML = `
             <div class="player-header">
                 <span class="player-name">${p.name}</span>
@@ -249,10 +253,10 @@ function render() {
         bank.history.forEach(tx => {
             const li = document.createElement('li');
             li.className = `history-item ${tx.type}`;
-            
+
             const timeStr = tx.timestamp.toLocaleTimeString();
             let desc = '';
-            
+
             if (tx.type === 'transfer') {
                 const pF = bank.getPlayer(tx.from);
                 const pT = bank.getPlayer(tx.to);
@@ -333,7 +337,7 @@ document.querySelectorAll('.action-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
         const action = e.currentTarget.dataset.action;
         const playersCount = bank.players.size;
-        
+
         if (playersCount === 0) {
             alert("Primero debes crear jugadores.");
             return;
@@ -350,7 +354,7 @@ document.querySelectorAll('.action-btn').forEach(btn => {
         const titleEl = document.getElementById('transaction-title');
         const fgFrom = document.getElementById('fg-from');
         const fgTo = document.getElementById('fg-to');
-        
+
         const selFrom = document.getElementById('select-tx-from');
         const selTo = document.getElementById('select-tx-to');
 
@@ -368,7 +372,7 @@ document.querySelectorAll('.action-btn').forEach(btn => {
             populateSelects([selFrom, selTo]);
             selFrom.required = true;
             selTo.required = true;
-            
+
         } else if (action === 'pay-bank') {
             titleEl.textContent = '🏦 Pagar al Banco';
             fgFrom.style.display = 'block';
@@ -399,7 +403,7 @@ document.getElementById('form-transaction').addEventListener('submit', (e) => {
     const amount = document.getElementById('input-tx-amount').value;
 
     try {
-        bank.executeTx(type, type==='receive-bank'?'BANK':fromId, type==='pay-bank'?'BANK':toId, amount);
+        bank.executeTx(type, type === 'receive-bank' ? 'BANK' : fromId, type === 'pay-bank' ? 'BANK' : toId, amount);
         hideModal('transaction');
         render();
     } catch (err) {
@@ -412,10 +416,10 @@ document.getElementById('select-inv-type').addEventListener('change', (e) => {
     const desc = document.getElementById('inv-desc');
     if (e.target.value === 'closed') {
         desc.className = "help-text text-green";
-        desc.textContent = "🟢 SEGURO: Gana una rentabilidad fija equivalente a +10% del capital por cada turno invertido.";
+        desc.textContent = "🟢 SEGURO: Rentabilidad fija de +10% del capital por cada turno. Crecimiento lineal y predecible.";
     } else {
         desc.className = "help-text text-red";
-        desc.textContent = "🔴 ALTO RIESGO: 50% Gana 20%, 30% Gana 50%, o 20% Pierde el 30% (Sin importar los turnos).";
+        desc.textContent = "🔴 VARIABLE: El capital fluctúa cada turno entre -10% y +30%. El resultado final se calcula promediando la trayectoria usando la regla del trapecio.";
     }
 });
 
@@ -431,11 +435,11 @@ document.getElementById('form-investment').addEventListener('submit', (e) => {
         bank.invest(pId, amount, type, turns);
         e.target.reset();
         hideModal('investment');
-        
+
         // Reset description text color and string just in case
         document.getElementById('inv-desc').className = "help-text text-green";
         document.getElementById('inv-desc').textContent = "🟢 SEGURO: Gana una rentabilidad fija equivalente a +10% del capital por cada turno invertido.";
-        
+
         render();
     } catch (err) {
         alert(err.message);
@@ -448,7 +452,7 @@ document.getElementById('btn-next-turn').addEventListener('click', () => {
         alert("Agrega jugadores para empezar a jugar y turnarse.");
         return;
     }
-    
+
     // Animate button
     const btn = document.getElementById('btn-next-turn');
     btn.classList.add('shake');
@@ -456,7 +460,7 @@ document.getElementById('btn-next-turn').addEventListener('click', () => {
 
     const events = bank.advanceTurn();
     if (events.length > 0) {
-        alert('🔔 Resultados de Inversiones:\n\n' + events.map(e => `👤 ${bank.getPlayer(e.playerId).name}: ${e.txt}`).join('\n'));
+        showInvestmentResults(events);
     }
     render();
 });
@@ -466,10 +470,162 @@ btnUndo.addEventListener('click', () => {
     try {
         bank.undoLastRevertible();
         render();
-    } catch(err) {
+    } catch (err) {
         alert(err.message);
     }
 });
+
+function showInvestmentResults(events) {
+    let html = `
+    <div class="modal" id="results-modal">
+        <div class="modal-content glass-panel">
+            <button class="close-btn" onclick="this.closest('.modal').remove()">&times;</button>
+            <h2>📊 Resultados de Inversión</h2>
+    `;
+
+    events.forEach((e, i) => {
+        html += `
+            <div>
+                <p><strong>${bank.getPlayer(e.playerId).name}</strong>: ${e.txt}</p>
+                ${e.path ? `<canvas id="chart-${i}" width="300" height="150"></canvas>` : ''}
+            </div>
+        `;
+    });
+
+    html += `</div></div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+
+    events.forEach((e, i) => {
+        if (!e.path) return;
+        drawChart(`chart-${i}`, e.path, e.initial, e.final);
+    });
+}
+
+function drawChart(canvasId, data, initial, realFinal) {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+
+    const max = Math.max(...data);
+    const min = Math.min(...data);
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const getX = i => (i / (data.length - 1)) * w;
+    const getY = val => h - ((val - min) / (max - min)) * h;
+
+    // =========================
+    // 🔷 TRAPECIOS LIMPIOS + %
+    // =========================
+    for (let i = 0; i < data.length - 1; i++) {
+        const x1 = getX(i);
+        const x2 = getX(i + 1);
+
+        const y1 = getY(data[i]);
+        const y2 = getY(data[i + 1]);
+
+        const isUp = data[i + 1] >= data[i];
+
+        // Relleno
+        ctx.fillStyle = isUp ? "rgba(0,255,0,0.2)" : "rgba(255,0,0,0.2)";
+
+        ctx.beginPath();
+        ctx.moveTo(x1, h);
+        ctx.lineTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.lineTo(x2, h);
+        ctx.closePath();
+        ctx.fill();
+
+        // Borde
+        ctx.strokeStyle = isUp ? "rgba(0,255,0,0.6)" : "rgba(255,0,0,0.6)";
+        ctx.stroke();
+
+        // Línea superior
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = "white";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // 📊 % cambio (ÚNICO DATO)
+        const pct = ((data[i + 1] - data[i]) / data[i]) * 100;
+
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+
+        ctx.fillStyle = "white";
+        ctx.font = "10px Outfit";
+        ctx.fillText(`${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`, midX - 10, midY);
+    }
+
+    // =========================
+    // 📈 LÍNEA PRINCIPAL
+    // =========================
+    ctx.beginPath();
+    data.forEach((val, i) => {
+        const x = getX(i);
+        const y = getY(val);
+
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+
+    ctx.strokeStyle = data[data.length - 1] >= initial ? "lime" : "red";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // =========================
+    // 📏 EJE X (TURNOS)
+    // =========================
+    const turns = data.length - 1;
+
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.font = "10px Outfit";
+
+    for (let i = 0; i < data.length; i++) {
+        const x = getX(i);
+
+        // evitar saturación: mostrar solo algunos
+        if (turns <= 10 || i % Math.ceil(turns / 8) === 0 || i === turns) {
+            ctx.fillText(i, x - 3, h + 12);
+        }
+    }
+
+    // Label eje
+    ctx.font = "11px Outfit";
+    ctx.fillText("Turnos", w / 2 - 20, h + 25);
+
+    // =========================
+    // 📏 LÍNEA BASE INICIAL
+    // =========================
+    const baseY = getY(initial);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.2)";
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(0, baseY);
+    ctx.lineTo(w, baseY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // =========================
+    // 🎯 INFO RESUMIDA
+    // =========================
+    const change = ((realFinal - initial) / initial) * 100;
+
+    ctx.fillStyle = "white";
+    ctx.font = "12px Outfit";
+
+    ctx.fillText(`Inicio: ${Math.floor(initial)}`, 10, 15);
+    ctx.fillText(`Final: ${Math.floor(final)}`, 10, 30);
+    ctx.fillText(`Total: ${change.toFixed(1)}%`, 10, 45);
+}
+
+
 
 // Initial Render
 render();
